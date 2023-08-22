@@ -1,9 +1,10 @@
-use std::sync::mpsc;
-use std::thread::sleep;
+use core::time::Duration;
 use crossbeam::thread;
 use rand::Rng;
-use core::time::Duration;
 use std::convert::TryInto;
+use std::env;
+use std::sync::mpsc;
+use std::thread::sleep;
 
 static mut CHANNELS_R: Option<Vec<(mpsc::Sender<i32>, mpsc::Receiver<i32>)>> = None;
 static mut CHANNELS_L: Option<Vec<(mpsc::Sender<i32>, mpsc::Receiver<i32>)>> = None;
@@ -11,10 +12,30 @@ static mut QUIT_CH_R: Option<Vec<(mpsc::Sender<bool>, mpsc::Receiver<bool>)>> = 
 static mut QUIT_CH_L: Option<Vec<(mpsc::Sender<bool>, mpsc::Receiver<bool>)>> = None;
 
 fn main() {
-    const N: i32 = 32;   // Number of processes
-    const X: i32 = 20;    // Number of values in each process
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        println!("Brak podanego parametru.");
+        return;
+    }
 
-    // Inicjalizacja kanałów
+    let param = &args[1];
+    let mut N: i32 = match param.parse() {
+        Ok(val) => val,
+        Err(err) => {
+            println!("Błąd parsowania parametru: {}", err);
+            return;
+        }
+    };
+
+    let param = &args[2];
+    let mut X: i32 = match param.parse() {
+        Ok(val) => val,
+        Err(err) => {
+            println!("Błąd parsowania parametru: {}", err);
+            return;
+        }
+    };
+
     unsafe {
         CHANNELS_R = Some(Vec::new());
         CHANNELS_L = Some(Vec::new());
@@ -43,237 +64,151 @@ fn main() {
             arr.push(rng.gen_range(0..100000));
         }
         arrays.push(arr.clone());
-        println!("{:?}", arr);
     }
 
     crossbeam::thread::scope(|scope| {
         for (index, array) in arrays.iter_mut().enumerate() {
             if index == 0 {
                 // First element
-                scope.spawn(move |_| distributed_sort_first(
-                    index as i32,
-                    N,
-                    array,
-                    ));
+                scope.spawn(move |_| distributed_sort_first(index as i32, N, array));
             } else if index == (N - 1).try_into().unwrap() {
                 // Last element
-                scope.spawn(move |_| distributed_sort_last(
-                    index as i32,
-                    N,
-                    array,
-                    ));
+                scope.spawn(move |_| distributed_sort_last(index as i32, N, array));
             } else {
                 // Middle elements
-                scope.spawn(move |_| distributed_sort(
-                    index as i32,
-                    N,
-                    array,
-                    ));
+                scope.spawn(move |_| distributed_sort(index as i32, N, array));
             }
         }
     })
     .unwrap();
-
-    // print result
-    for arr in arrays {
-        println!("{:?}", arr);
-    }
 }
-
-fn distributed_sort_first(
-    process_id: i32,
-    n: i32,
-    values: &mut Vec<i32>,
-) {
-    unsafe{
-        let right_chan_in = &CHANNELS_R.as_ref().unwrap()[(process_id+1) as usize].0;
+fn distributed_sort_first(process_id: i32, n: i32, values: &mut Vec<i32>) {
+    unsafe {
+        let right_chan_in = &CHANNELS_R.as_ref().unwrap()[(process_id + 1) as usize].0;
         let right_chan_out = &CHANNELS_L.as_ref().unwrap()[process_id as usize].1;
-        let termination_ch_in = &QUIT_CH_R.as_ref().unwrap()[(process_id+1) as usize].0;
+        let termination_ch_in = &QUIT_CH_R.as_ref().unwrap()[(process_id + 1) as usize].0;
         let termination_ch_out = &QUIT_CH_L.as_ref().unwrap()[process_id as usize].1;
-    
-    // Implementacja dla pierwszego przypadku
-    let mut lin = -10000;
-    let mut already_send = false;
-    let mut mx = update(values).1;
-    let mut end = false;
-
-    while !end {
-        if mx > lin {
-            right_chan_in.send(mx).unwrap();
-            println!("{} wysłałem {}", process_id, mx);
-            remove_element(values, mx);
-            mx = update(values).1;
-            lin = right_chan_out.recv().unwrap();
-            println!("{} Dostałem {}", process_id, lin);
-            values.push(lin);
-            mx = update(values).1;
-        } else if !already_send {
-            termination_ch_in.send(true).unwrap();
-            println!("{} send termination to right", process_id);
-            already_send = true;
-            end = termination_ch_out.recv().unwrap();
-        }
-        match termination_ch_out.try_recv() {
-            Ok(new_end) => end = new_end,
-            Err(_) => continue,
-        }
-    }
-
-    println!("{}: Wychodzę! {:?}", process_id, values);
-    sleep(Duration::from_millis(10));
-    }
-}
-
-fn distributed_sort(
-    process_id: i32,
-    n: i32,
-    values: &mut Vec<i32>,
-) {
-    unsafe{
-    let right_chan_in = &CHANNELS_R.as_ref().unwrap()[(process_id+1) as usize].0;
-    let left_chan_in = &CHANNELS_L.as_ref().unwrap()[(process_id-1) as usize].0;
-    let right_chan_out = &CHANNELS_L.as_ref().unwrap()[process_id as usize].1;
-    let left_chan_out = &CHANNELS_R.as_ref().unwrap()[process_id as usize].1;
-    let right_termination_ch_in = &QUIT_CH_R.as_ref().unwrap()[(process_id+1) as usize].0;
-    let left_termination_ch_in = &QUIT_CH_L.as_ref().unwrap()[(process_id-1) as usize].0;
-    let right_termination_ch_out = &QUIT_CH_L.as_ref().unwrap()[process_id as usize].1;
-    let left_termination_ch_out = &QUIT_CH_R.as_ref().unwrap()[process_id as usize].1;
-
-        
-    // Implementacja dla przypadku środkowego
-    let mut lin = -1000;
-    let mut l = 777;
-    let mut mn = update(values).0;
-    let mut mx = update(values).1;
-    let mut left_ready_for_end = false;
-    let mut already_send = false;
-    let mut end = false;
-
-    while !end {
-        //println!("DUPA DEBUG");
-
-        if mx > lin {
-            right_chan_in.send(mx).unwrap();
-            println!("{} wysłałem {} i czekam", process_id, mx);
-            remove_element(values, mx);
-            mn = update(values).0;
-            mx = update(values).1;
-            lin = right_chan_out.recv().unwrap();
-            println!("{} Dostałem {}", process_id, lin);
-          
-            values.push(lin);
-            mn = update(values).0;
-            mx = update(values).1;
-        } else {
-            if !already_send && left_ready_for_end {
-                right_termination_ch_in.send(true).unwrap();
-                println!("{} send termination to right", process_id);
-                already_send = true;
-            }
-        }
-        //println!("{} nasłuchuję pracuję {:?}", process_id, &values);
-
-        match (left_chan_out.try_recv(), right_termination_ch_out.try_recv(), left_termination_ch_out.try_recv()) {
-            (Ok(new_l), _, _) => {
-                values.push(new_l);
-                mn = update(values).0;
+        let mut lin = -10000;
+        let mut already_send = false;
+        let mut mx = update(values).1;
+        let mut end = false;
+        while !end {
+            if mx > lin {
+                right_chan_in.send(mx).unwrap();
+                remove_element(values, mx);
                 mx = update(values).1;
-                left_chan_in.send(mn).unwrap();
-                remove_element(values, mn);
-                mn = update(values).0;
+                lin = right_chan_out.recv().unwrap();
+                values.push(lin);
                 mx = update(values).1;
-            }
-            (_, Ok(new_end), _) => {
-                left_termination_ch_in.send(true).unwrap();
-                println!("{} get termination from right and send termination to left", process_id);
-                end = new_end;
-            }
-            (_, _, Ok(new_left_ready_for_end)) => {
-                
-                left_ready_for_end = new_left_ready_for_end;
-            }
-            _ => continue,
-        }
-    }
-
-    println!("{}: Wychodzę! {:?}", process_id, &values);
-    }
-}
-
-
-fn distributed_sort_last(
-    process_id: i32,
-    n: i32,
-    values: &mut Vec<i32>,
-) {
-    unsafe{
-    let left_chan_in = &CHANNELS_L.as_ref().unwrap()[(process_id-1) as usize].0;
-    let left_chan_out = &CHANNELS_R.as_ref().unwrap()[process_id as usize].1;
-    let termination_ch_in = &QUIT_CH_L.as_ref().unwrap()[(process_id-1) as usize].0;
-    let termination_ch_out = &QUIT_CH_R.as_ref().unwrap()[process_id as usize].1;
-    
-    //Implementacja dla ostatniego przypadku
-    let mut l = 0;
-    let mut mn = update(values).0;
-    let mut end = false;
-
-    while !end {
-        //println!("{} pracuję {:?}", process_id, values);
-
-        match (left_chan_out.try_recv(), termination_ch_out.try_recv()) {
-            (Ok(new_l), _) => {
-                values.push(new_l);
-                mn = update(values).0;
-                left_chan_in.send(mn).unwrap();
-                println!("{} wysłałem {}", process_id, mn);
-                remove_element(values, mn);
-                mn = update(values).0;
-            }
-            (_, Ok(new_end)) => {
+            } else if !already_send {
                 termination_ch_in.send(true).unwrap();
-                println!("{} get termination from left", process_id);
-                println!("{} send termination from left", process_id);
-                end = new_end;
+                already_send = true;
+                end = termination_ch_out.recv().unwrap();
             }
-            _ => continue,
+            match termination_ch_out.try_recv() {
+                Ok(new_end) => end = new_end,
+                Err(_) => continue,
+            }
         }
     }
-    println!("Wychodzę (last)");
+}
+fn distributed_sort(process_id: i32, n: i32, values: &mut Vec<i32>) {
+    unsafe {
+        let right_chan_in = &CHANNELS_R.as_ref().unwrap()[(process_id + 1) as usize].0;
+        let left_chan_in = &CHANNELS_L.as_ref().unwrap()[(process_id - 1) as usize].0;
+        let right_chan_out = &CHANNELS_L.as_ref().unwrap()[process_id as usize].1;
+        let left_chan_out = &CHANNELS_R.as_ref().unwrap()[process_id as usize].1;
+        let right_termination_ch_in = &QUIT_CH_R.as_ref().unwrap()[(process_id + 1) as usize].0;
+        let left_termination_ch_in = &QUIT_CH_L.as_ref().unwrap()[(process_id - 1) as usize].0;
+        let right_termination_ch_out = &QUIT_CH_L.as_ref().unwrap()[process_id as usize].1;
+        let left_termination_ch_out = &QUIT_CH_R.as_ref().unwrap()[process_id as usize].1;
+        let mut lin = -1000;
+        let mut l = 777;
+        let mut mn = update(values).0;
+        let mut mx = update(values).1;
+        let mut left_ready_for_end = false;
+        let mut already_send = false;
+        let mut end = false;
+        while !end {
+            if mx > lin {
+                right_chan_in.send(mx).unwrap();
+                remove_element(values, mx);
+                mn = update(values).0;
+                mx = update(values).1;
+                lin = right_chan_out.recv().unwrap();
+                values.push(lin);
+                mn = update(values).0;
+                mx = update(values).1;
+            } else {
+                if !already_send && left_ready_for_end {
+                    right_termination_ch_in.send(true).unwrap();
+                    already_send = true;
+                }
+            }
+            match (
+                left_chan_out.try_recv(),
+                right_termination_ch_out.try_recv(),
+                left_termination_ch_out.try_recv(),
+            ) {
+                (Ok(new_l), _, _) => {
+                    values.push(new_l);
+                    mn = update(values).0;
+                    mx = update(values).1;
+                    left_chan_in.send(mn).unwrap();
+                    remove_element(values, mn);
+                    mn = update(values).0;
+                    mx = update(values).1;
+                }
+                (_, Ok(new_end), _) => {
+                    left_termination_ch_in.send(true).unwrap();
+                    end = new_end;
+                }
+                (_, _, Ok(new_left_ready_for_end)) => {
+                    left_ready_for_end = new_left_ready_for_end;
+                }
+                _ => continue,
+            }
+        }
     }
 }
-
+fn distributed_sort_last(process_id: i32, n: i32, values: &mut Vec<i32>) {
+    unsafe {
+        let left_chan_in = &CHANNELS_L.as_ref().unwrap()[(process_id - 1) as usize].0;
+        let left_chan_out = &CHANNELS_R.as_ref().unwrap()[process_id as usize].1;
+        let termination_ch_in = &QUIT_CH_L.as_ref().unwrap()[(process_id - 1) as usize].0;
+        let termination_ch_out = &QUIT_CH_R.as_ref().unwrap()[process_id as usize].1;
+        let mut l = 0;
+        let mut mn = update(values).0;
+        let mut end = false;
+        while !end {
+            match (left_chan_out.try_recv(), termination_ch_out.try_recv()) {
+                (Ok(new_l), _) => {
+                    values.push(new_l);
+                    mn = update(values).0;
+                    left_chan_in.send(mn).unwrap();
+                    remove_element(values, mn);
+                    mn = update(values).0;
+                }
+                (_, Ok(new_end)) => {
+                    termination_ch_in.send(true).unwrap();
+                    end = new_end;
+                }
+                _ => continue,
+            }
+        }
+    }
+}
 fn remove_element(arr: &mut Vec<i32>, value: i32) {
     if let Some(index) = arr.iter().position(|&x| x == value) {
         arr.remove(index);
     }
 }
-
-/*fn update(arr: &Vec<i32>) -> (i32, i32) {
-    let mut sorted_arr = arr.clone();
-    sorted_arr.sort();
-    if let Some(&min_value) = sorted_arr.first() {
-        if let Some(&max_value) = sorted_arr.last() {
-            return (min_value, max_value);
-        }
-    }
-    (0, 0)
-}*/
-
 fn update(arr: &mut Vec<i32>) -> (i32, i32) {
     arr.sort();
-
     if arr.is_empty() {
         return (0, 0);
     }
-
     let min_value = arr[0];
     let max_value = arr[arr.len() - 1];
-
     (min_value, max_value)
-}
-
-fn log_to_console(message: &str) {
-    if false {
-        println!("# {}", message);
-    }
 }
