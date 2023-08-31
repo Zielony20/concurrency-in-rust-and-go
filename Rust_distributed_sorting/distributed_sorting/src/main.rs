@@ -1,3 +1,7 @@
+extern crate core;
+extern crate crossbeam;
+extern crate rand;
+
 use core::time::Duration;
 use crossbeam::thread;
 use rand::Rng;
@@ -69,13 +73,10 @@ fn main() {
     crossbeam::thread::scope(|scope| {
         for (index, array) in arrays.iter_mut().enumerate() {
             if index == 0 {
-                // First element
                 scope.spawn(move |_| distributed_sort_first(index as i32, N, array));
             } else if index == (N - 1).try_into().unwrap() {
-                // Last element
                 scope.spawn(move |_| distributed_sort_last(index as i32, N, array));
             } else {
-                // Middle elements
                 scope.spawn(move |_| distributed_sort(index as i32, N, array));
             }
         }
